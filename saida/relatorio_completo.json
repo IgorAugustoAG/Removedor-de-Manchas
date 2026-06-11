@@ -1,25 +1,24 @@
 {
   "etapa_1_deteccao": {
-    "Tipo de imagem": "colorida",
-    "Total de manchas detectadas": 99,
-    "Pixels marcados": "36,619",
-    "Cobertura da imagem": "2.33%",
-    "Maior mancha (px)": 1488.0,
-    "Metodo Desvio local (LAB)": 505926,
-    "Metodo Cor cafe (HSV)": 179228,
-    "Metodo Canal b* (LAB)": 20629,
-    "Metodo Mancha clara/translucida": 33609,
+    "Tipo de imagem": "branca",
+    "Total de manchas detectadas": 4,
+    "Pixels marcados": "43,118",
+    "Cobertura da imagem": "26.53%",
+    "Maior mancha (px)": 37920.0,
+    "Metodo Saturacao HSV": 31142,
+    "Metodo Relevo": 27732,
+    "Metodo Textura": 30297,
     "Imagem salva em": "saida/01_deteccao.png"
   },
   "etapa_2_separacao": {
-    "Manchas separadas": 99,
-    "Pixels no 2o plano": "80,076",
+    "Manchas separadas": 4,
+    "Pixels no 2o plano": "51,273",
     "Margem aplicada (px)": 4,
     "Frente (PNG com alpha)": "saida/02_frente.png",
     "Fundo (manchas isoladas)": "saida/02_fundo_manchas.png"
   },
   "etapa_3_reconstrucao": {
-    "Tipo de imagem": "colorida",
+    "Tipo de imagem": "branca",
     "Metodo de inpainting": "TELEA",
     "Raio de inpainting (px)": 5,
     "Ajuste de brilho": "x1.0",
@@ -28,8 +27,8 @@
     "Resultado salvo em": "saida/03_reconstruida.png"
   },
   "etapa_4_remocao": {
-    "Pixels modificados": "80,076 (5.09%)",
-    "Diferenca media (manchas)": "34.86",
+    "Pixels modificados": "51,273 (31.55%)",
+    "Diferenca media (manchas)": "34.21",
     "Diferenca media (resto)": "0.0000",
     "Imagem final salva em": "saida/04_imagem_final.png",
     "Mapa de diferenca salvo em": "saida/04_diferenca.png",
