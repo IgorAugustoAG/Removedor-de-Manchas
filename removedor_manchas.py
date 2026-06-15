@@ -1,48 +1,9 @@
 """
 =====================================================
-  REMOVEDOR DE MANCHAS — Sistema de 4 Etapas v2.4
+  REMOVEDOR DE MANCHAS — Sistema de 4 Etapas Beta-v2.20
 =====================================================
-  Correções v2.1:
-  ✅ Detecção por saturação HSV para fundo branco
-     (captura centro claro das manchas de café)
-  ✅ Preenchimento de contornos (elimina "anel vazio")
-  ✅ Reconstrução por cor de fundo para imagens brancas
-  ✅ Inpainting progressivo multi-escala para coloridas
-  ✅ Auto-detecção do tipo de imagem
-  ✅ Sem blur gaussiano na máscara (não borra texto)
-
-  Correções v2.2:
-  ✅ Correção de cor por referência GLOBAL do papel
-  ✅ Kernel de blur adaptativo ao tamanho de CADA mancha
-
-  Correções v2.3:
-  ✅ CORRIGIDO BUG CRÍTICO: quando o fundo da imagem é muito
-     uniforme (ex.: papel branco liso), o cálculo da "cor do
-     papel" usando percentil podia resultar em NaN, e
-     `NaN.astype(uint8)` virava 0 — o que pintava as manchas
-     de PRETO SÓLIDO em vez de removê-las (imagem 4). Agora há
-     fallback seguro + `np.nan_to_num` como rede de segurança.
-  ✅ Kernel de correção agora é PROPORCIONAL e MENOR que cada
-     mancha (antes era maior, o que fazia o blur "enxergar"
-     demais o papel ao redor e resultar em fator≈1, ou seja,
-     nenhuma correção visível em manchas grandes).
-  ✅ Fator de correção limitado a 5x (era 6x) para reduzir
-     manchas amarelas artificiais por overcorrection.
-  ✅ Removido o detector "mascara_saturada" (saturação global)
-     da composição final de `_detectar_colorida` — mesmo com
-     desvio local, ele continuava marcando áreas naturalmente
-     quentes/texturizadas de fotos reais (grama, pele, pedras
-     ao sol) como mancha, criando borrões artificiais.
-
-  Correções v2.4 (esta versão):
-  ✅ Novo detector "mascara_clara": captura manchas CLARAS/
-     translúcidas (ex.: respingos de água que clareiam e
-     "lavam" a cor da foto por baixo). mascara_cafe e mascara_b
-     só pegam manchas amareladas/acastanhadas; manchas que
-     deixam a área mais clara e menos saturada que a vizinhança
-     passavam batido. Continua exigindo desvio local
-     (mascara_local) para não marcar áreas naturalmente claras
-     da foto.
+  Detecção: multi-escala atual (v2.18/v2.19)
+  Restauração: _corrigir_mancha_colorida da v2.17 (inalterada)
 =====================================================
 Dependências: pip install opencv-python numpy scikit-image
 """
@@ -86,110 +47,206 @@ def _detectar_tipo_imagem(img_bgr: np.ndarray) -> str:
     img_hsv   = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     brilho    = img_hsv[:, :, 2].astype(np.float32)
     saturacao = img_hsv[:, :, 1].astype(np.float32)
-
     pct_branco = float(np.mean((brilho > 200) & (saturacao < 40)))
     var_cor    = float(np.mean([np.std(img_bgr[:, :, c].astype(float)) for c in range(3)]))
-
     tipo = "branca" if (pct_branco > 0.25 or var_cor < 35) else "colorida"
     print(f"  Tipo detectado: {tipo.upper()}  "
-          f"(fundo branco: {pct_branco:.1%} | variancia de cor: {var_cor:.1f})")
+          f"(fundo branco: {pct_branco:.1%} | variancia: {var_cor:.1f})")
     return tipo
 
 
 def _limpar_mascara(mascara: np.ndarray, tamanho_minimo: int) -> np.ndarray:
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    m = cv2.morphologyEx(mascara, cv2.MORPH_OPEN,  kernel)
-    m = cv2.morphologyEx(m,       cv2.MORPH_CLOSE, kernel)
-
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    m = cv2.morphologyEx(mascara.astype(np.uint8), cv2.MORPH_OPEN,  kernel)
+    m = cv2.morphologyEx(m,                        cv2.MORPH_CLOSE, kernel)
     contornos, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    m_preenchida = np.zeros_like(m)
-    for contorno in contornos:
-        if cv2.contourArea(contorno) >= tamanho_minimo:
-            cv2.drawContours(m_preenchida, [contorno], -1, 1, cv2.FILLED)
+    m_out = np.zeros_like(m)
+    for c in contornos:
+        if cv2.contourArea(c) >= tamanho_minimo:
+            cv2.drawContours(m_out, [c], -1, 1, cv2.FILLED)
+    return m_out
 
-    return m_preenchida
 
+# ─── DETECÇÃO PARA FUNDO BRANCO (inalterada da v2.17) ────────────────────────
 
-def _detectar_fundo_branco(
-    img_bgr: np.ndarray,
-    limiar_cor: float,
-    limiar_relevo: float,
-    limiar_textura: float,
-) -> tuple:
+def _detectar_fundo_branco(img_bgr, limiar_cor, limiar_relevo, limiar_textura):
     img_cinza = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     img_hsv   = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-
-    saturacao   = img_hsv[:, :, 1].astype(np.float32)
-    brilho      = img_hsv[:, :, 2].astype(np.float32)
-    limiar_s    = max(6.0, limiar_cor * 0.28)
+    saturacao = img_hsv[:, :, 1].astype(np.float32)
+    brilho    = img_hsv[:, :, 2].astype(np.float32)
+    limiar_s  = max(6.0, limiar_cor * 0.28)
     mascara_cor = ((saturacao > limiar_s) | (brilho < 242)).astype(np.uint8)
-
     gx  = cv2.Sobel(img_cinza, cv2.CV_64F, 1, 0, ksize=3)
     gy  = cv2.Sobel(img_cinza, cv2.CV_64F, 0, 1, ksize=3)
-    mag = cv2.GaussianBlur(np.sqrt(gx ** 2 + gy ** 2), (15, 15), 0)
+    mag = cv2.GaussianBlur(np.sqrt(gx**2 + gy**2), (15, 15), 0)
     m, s = np.mean(mag), np.std(mag)
     mascara_rel = (mag > (m + limiar_relevo * s / 100)).astype(np.uint8)
-
     k  = np.ones((15, 15), np.float32) / 225
     ml = cv2.filter2D(img_cinza.astype(np.float32), -1, k)
-    ql = cv2.filter2D((img_cinza.astype(np.float32)) ** 2, -1, k)
-    var = np.clip(ql - ml ** 2, 0, None)
+    ql = cv2.filter2D(img_cinza.astype(np.float32)**2, -1, k)
+    var = np.clip(ql - ml**2, 0, None)
     m, s = np.mean(var), np.std(var)
     mascara_tex = (var > (m + limiar_textura * s / 100)).astype(np.uint8)
-
     soma = mascara_cor + mascara_rel + mascara_tex
     return (soma >= 1).astype(np.uint8), mascara_cor, mascara_rel, mascara_tex
 
 
-def _detectar_colorida(
-    img_bgr: np.ndarray,
-    sensibilidade: float,
-) -> tuple:
+# ─── DETECÇÃO MULTI-ESCALA ATUAL (v2.18) ─────────────────────────────────────
+
+def _detectar_colorida(img_bgr: np.ndarray, sensibilidade: float) -> tuple:
     h, w = img_bgr.shape[:2]
-    raio = max(min(h, w) // 20, 21)
-    raio = raio | 1
+    menor_dim = min(h, w)
+
+    raios_raw = [
+        max(menor_dim // 40, 11),
+        max(menor_dim // 20, 21),
+        max(menor_dim // 8,  31),
+        max(menor_dim // 4,  51),
+    ]
+    raios = sorted(set([min(r | 1, 251) for r in raios_raw]))
+    print(f"    Raios de deteccao: {raios}")
 
     img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-    sigma    = raio / 3.0
-    base_lab = cv2.GaussianBlur(img_lab, (raio, raio), sigma)
-    base_hsv = cv2.GaussianBlur(img_hsv, (raio, raio), sigma)
+    score      = np.zeros((h, w), dtype=np.float32)
+    mascaras   = []
+    peso_total = 0.0
 
-    desvio_local = np.sqrt(np.sum((img_lab - base_lab) ** 2, axis=2))
-    p5  = np.percentile(desvio_local, 5)
-    p95 = np.percentile(desvio_local, 95)
-    dev_norm = np.clip((desvio_local - p5) / (p95 - p5 + 1e-6), 0, 1)
-    mascara_local = (dev_norm > (0.35 / sensibilidade)).astype(np.uint8)
+    for i, r in enumerate(raios):
+        sigma = r / 3.0
+        peso  = (i + 1) / len(raios)
+        bl    = cv2.GaussianBlur(img_lab, (r, r), sigma)
+        bh    = cv2.GaussianBlur(img_hsv, (r, r), sigma)
 
-    faixa_cafe = (
-        (img_hsv[:, :, 0] >= 8)  & (img_hsv[:, :, 0] <= 42) &
-        (img_hsv[:, :, 1] >= 35) &
-        (img_hsv[:, :, 2] >= 40) & (img_hsv[:, :, 2] <= 235)
-    )
-    h_diff = np.abs(img_hsv[:, :, 0] - base_hsv[:, :, 0])
-    h_diff = np.minimum(h_diff, 180 - h_diff)
-    s_diff = np.abs(img_hsv[:, :, 1].astype(float) - base_hsv[:, :, 1].astype(float))
-    mascara_cafe = (faixa_cafe & ((h_diff > 18) | (s_diff > 35))).astype(np.uint8)
+        dl   = img_lab[:, :, 0] - bl[:, :, 0]
+        ds   = img_hsv[:, :, 1] - bh[:, :, 1]
+        dv   = np.sqrt(np.sum((img_lab - bl) ** 2, axis=2))
+        p5, p95 = np.percentile(dv, 5), np.percentile(dv, 95)
+        dv_n = np.clip((dv - p5) / (p95 - p5 + 1e-6), 0, 1)
 
-    b_diff = img_lab[:, :, 2] - base_lab[:, :, 2]
-    p88    = np.percentile(b_diff, 88)
-    std_b  = np.std(b_diff)
-    mascara_b = (b_diff > (p88 + std_b * 1.5 / sensibilidade)).astype(np.uint8)
+        m = (
+            (dv_n > 0.20 / sensibilidade) &
+            (dl   < -3.0 * sensibilidade) &
+            (ds   > 8.0  / sensibilidade)
+        ).astype(np.uint8)
 
-    l_diff   = img_lab[:, :, 0] - base_lab[:, :, 0]
-    sat_diff = img_hsv[:, :, 1].astype(np.float32) - base_hsv[:, :, 1]
-    p85_l    = np.percentile(l_diff, 85)
-    std_l    = np.std(l_diff)
-    mascara_clara = (
-        (l_diff > (p85_l + std_l * 1.5 / sensibilidade)) &
-        (sat_diff < -10)
-    ).astype(np.uint8)
+        score      += m.astype(np.float32) * peso
+        peso_total += peso
+        mascaras.append(m)
 
-    mascara = (mascara_local & (mascara_cafe | mascara_b | mascara_clara)).astype(np.uint8)
+    score /= peso_total
+    mascara = (score >= 0.25 / sensibilidade).astype(np.uint8)
+    return mascara, score, mascaras, raios
 
-    return mascara, mascara_local, mascara_cafe, mascara_b, mascara_clara
 
+# ─── RESTAURAÇÃO DA v2.17 — INALTERADA ───────────────────────────────────────
+
+def _corrigir_mancha_colorida(img: np.ndarray, mascara: np.ndarray) -> np.ndarray:
+    img_f      = img.astype(np.float32)
+    mascara_u8 = mascara.astype(np.uint8)
+    h, w       = img.shape[:2]
+
+    px_fora = img_f.reshape(-1, 3)[mascara.flatten() == 0]
+    if px_fora.size == 0:
+        return img.copy()
+
+    lum        = px_fora.mean(axis=1)
+    limiar_lum = np.percentile(lum, 70)
+    px_papel   = px_fora[lum >= limiar_lum]
+    if px_papel.size == 0:
+        px_papel = px_fora
+
+    papel_cor = np.median(px_papel, axis=0)
+    papel_cor = np.nan_to_num(papel_cor, nan=255.0)
+    papel_cor = np.maximum(papel_cor, 1.0)
+    print(f"    Cor do papel (BGR): {papel_cor.astype(int).tolist()}")
+
+    papel_cor_lab = cv2.cvtColor(
+        np.clip(papel_cor, 0, 255).reshape(1, 1, 3).astype(np.uint8), cv2.COLOR_BGR2LAB
+    ).astype(np.float32).reshape(3)
+
+    contornos, _ = cv2.findContours(mascara_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    resultado = img.copy()
+
+    for c in contornos:
+        x, y, cw, ch = cv2.boundingRect(c)
+        menor_dim = max(min(cw, ch), 1)
+
+        k = int(menor_dim * 0.5) | 1
+        k = max(k, 9)
+        k = min(k, 81)
+        k = min(k, (min(h, w) - 1) | 1)
+        if k < 3:
+            continue
+
+        sigma = k / 4.0
+
+        pad = k
+        x0, y0 = max(x - pad, 0), max(y - pad, 0)
+        x1, y1 = min(x + cw + pad, w), min(y + ch + pad, h)
+
+        regiao = img_f[y0:y1, x0:x1]
+
+        mascara_janela = mascara_u8[y0:y1, x0:x1]
+        px_fora_local  = regiao.reshape(-1, 3)[mascara_janela.flatten() == 0]
+        if px_fora_local.size > 0:
+            lum_local  = px_fora_local.mean(axis=1)
+            limiar_l   = np.percentile(lum_local, 70)
+            px_papel_l = px_fora_local[lum_local >= limiar_l]
+            if px_papel_l.size == 0:
+                px_papel_l = px_fora_local
+            papel_local = np.median(px_papel_l, axis=0)
+            papel_local = np.nan_to_num(papel_local, nan=papel_cor)
+            papel_local = np.maximum(papel_local, 1.0)
+
+            papel_local_lab = cv2.cvtColor(
+                np.clip(papel_local, 0, 255).reshape(1, 1, 3).astype(np.uint8),
+                cv2.COLOR_BGR2LAB,
+            ).astype(np.float32).reshape(3)
+            delta_lab = papel_local_lab - papel_cor_lab
+
+            if (np.linalg.norm(delta_lab) > 16.0) or (delta_lab[2] < -6.0):
+                papel_local = papel_cor
+        else:
+            papel_local = papel_cor
+
+        bg_regiao = cv2.GaussianBlur(regiao, (k, k), sigma)
+        bg_regiao = np.maximum(bg_regiao, 1.0)
+
+        fator = np.clip(papel_local / bg_regiao, 0.5, 8.0)
+        corr  = np.clip(regiao * fator, 0, papel_local * 1.05)
+
+        falta = papel_local - corr
+        corr  = corr + falta * 0.45
+        corr  = np.clip(corr, 0, papel_local * 1.05)
+
+        # v2.16: clamp de sanidade — tons quentes: B <= G <= R
+        corr[:, :, 1] = np.minimum(corr[:, :, 1], corr[:, :, 2])
+        corr[:, :, 0] = np.minimum(corr[:, :, 0], corr[:, :, 1])
+
+        # v2.17: clip explícito antes do cast uint8
+        corr  = np.nan_to_num(corr, nan=0.0)
+        corr  = np.clip(corr, 0, 255)
+        corr  = corr.astype(np.uint8)
+
+        mascara_c = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(mascara_c, [c], -1, 1, cv2.FILLED)
+        mascara_regiao = mascara_c[y0:y1, x0:x1].astype(bool)
+
+        recorte_resultado = resultado[y0:y1, x0:x1]
+        recorte_resultado[mascara_regiao] = corr[mascara_regiao]
+
+    kernel_b = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    borda    = cv2.dilate(mascara_u8, kernel_b) - mascara_u8
+    if borda.sum() > 0:
+        resultado = cv2.inpaint(resultado, borda, 2, cv2.INPAINT_TELEA)
+
+    return resultado
+
+
+# ─── ETAPA 1: DETECÇÃO ───────────────────────────────────────────────────────
 
 def detectar_manchas(
     caminho_imagem: str,
@@ -197,7 +254,7 @@ def detectar_manchas(
     limiar_cor: float     = 35.0,
     limiar_relevo: float  = 15.0,
     limiar_textura: float = 8.0,
-    tamanho_minimo: int   = 100,
+    tamanho_minimo: int   = 80,
     sensibilidade: float  = 1.0,
     tipo_imagem: str      = "auto",
 ) -> dict:
@@ -208,6 +265,8 @@ def detectar_manchas(
     if tipo_imagem == "auto":
         tipo_imagem = _detectar_tipo_imagem(img_bgr)
 
+    score_mapa = None
+
     if tipo_imagem == "branca":
         mascara_bruta, mc, mr, mt = _detectar_fundo_branco(
             img_bgr, limiar_cor, limiar_relevo, limiar_textura
@@ -215,9 +274,11 @@ def detectar_manchas(
         nomes_metodos = ["Saturacao HSV", "Relevo", "Textura"]
         mascaras_sub  = [mc, mr, mt]
     else:
-        mascara_bruta, ml, mcafe, mb, mclara = _detectar_colorida(img_bgr, sensibilidade)
-        nomes_metodos = ["Desvio local (LAB)", "Cor cafe (HSV)", "Canal b* (LAB)", "Mancha clara/translucida"]
-        mascaras_sub  = [ml, mcafe, mb, mclara]
+        mascara_bruta, score_mapa, mascaras_escala, raios_usados = _detectar_colorida(
+            img_bgr, sensibilidade
+        )
+        nomes_metodos = [f"Escala_r{r}" for r in raios_usados]
+        mascaras_sub  = mascaras_escala
 
     mascara_limpa = _limpar_mascara(mascara_bruta, tamanho_minimo)
 
@@ -239,7 +300,7 @@ def detectar_manchas(
         "Pixels marcados":             f"{total_px:,}",
         "Cobertura da imagem":         f"{pct}%",
         "Maior mancha (px)":           max((r.area for r in regioes), default=0),
-        **{f"Metodo {n}":              int(m.sum()) for n, m in zip(nomes_metodos, mascaras_sub)},
+        **{f"Metodo {n}": int(m.sum()) for n, m in zip(nomes_metodos, mascaras_sub)},
         "Imagem salva em":             caminho_saida,
     }
     _imprimir_relatorio("RELATORIO - DETECCAO DE MANCHAS", relatorio)
@@ -247,12 +308,15 @@ def detectar_manchas(
     return {
         "imagem_original":   img_bgr,
         "mascara":           mascara_limpa,
+        "score_mapa":        score_mapa,
         "regioes":           regioes,
         "tipo_imagem":       tipo_imagem,
         "relatorio":         relatorio,
         "caminho_resultado": caminho_saida,
     }
 
+
+# ─── ETAPA 2: SEPARAÇÃO ──────────────────────────────────────────────────────
 
 def separar_manchas(
     resultado_deteccao: dict,
@@ -302,69 +366,7 @@ def separar_manchas(
     }
 
 
-def _corrigir_mancha_colorida(img: np.ndarray, mascara: np.ndarray) -> np.ndarray:
-    img_f      = img.astype(np.float32)
-    mascara_u8 = mascara.astype(np.uint8)
-    h, w       = img.shape[:2]
-
-    px_fora = img_f.reshape(-1, 3)[mascara.flatten() == 0]
-    if px_fora.size == 0:
-        return img.copy()
-
-    lum        = px_fora.mean(axis=1)
-    limiar_lum = np.percentile(lum, 70)
-    px_papel   = px_fora[lum >= limiar_lum]
-    if px_papel.size == 0:
-        px_papel = px_fora
-
-    papel_cor = np.median(px_papel, axis=0)
-    papel_cor = np.nan_to_num(papel_cor, nan=255.0)
-    papel_cor = np.maximum(papel_cor, 1.0)
-    print(f"    Cor do papel (BGR): {papel_cor.astype(int).tolist()}")
-
-    contornos, _ = cv2.findContours(mascara_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    resultado = img.copy()
-
-    for c in contornos:
-        x, y, cw, ch = cv2.boundingRect(c)
-        menor_dim = max(min(cw, ch), 1)
-
-        k = int(menor_dim * 0.5) | 1
-        k = max(k, 9)
-        k = min(k, 81)
-        k = min(k, (min(h, w) - 1) | 1)
-        if k < 3:
-            continue
-
-        sigma = k / 4.0
-
-        pad = k
-        x0, y0 = max(x - pad, 0), max(y - pad, 0)
-        x1, y1 = min(x + cw + pad, w), min(y + ch + pad, h)
-
-        regiao = img_f[y0:y1, x0:x1]
-        bg_regiao = cv2.GaussianBlur(regiao, (k, k), sigma)
-        bg_regiao = np.maximum(bg_regiao, 1.0)
-
-        fator = np.clip(papel_cor / bg_regiao, 0.5, 5.0)
-        corr  = np.clip(regiao * fator, 0, papel_cor * 1.05)
-        corr  = np.nan_to_num(corr, nan=0.0).astype(np.uint8)
-
-        mascara_c = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(mascara_c, [c], -1, 1, cv2.FILLED)
-        mascara_regiao = mascara_c[y0:y1, x0:x1].astype(bool)
-
-        recorte_resultado = resultado[y0:y1, x0:x1]
-        recorte_resultado[mascara_regiao] = corr[mascara_regiao]
-
-    kernel_b = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    borda    = cv2.dilate(mascara_u8, kernel_b) - mascara_u8
-    if borda.sum() > 0:
-        resultado = cv2.inpaint(resultado, borda, 2, cv2.INPAINT_TELEA)
-
-    return resultado
-
+# ─── ETAPA 3: RECONSTRUÇÃO ───────────────────────────────────────────────────
 
 def reconstruir_imagem(
     resultado_separacao: dict,
@@ -389,20 +391,14 @@ def reconstruir_imagem(
         pixels_fundo = img[mascara == 0].reshape(-1, 3).astype(np.float32)
         cor_fundo    = np.median(pixels_fundo, axis=0).astype(np.uint8)
         print(f"  Cor de fundo estimada: BGR{tuple(cor_fundo.tolist())}")
-
         img_reconstruida = img.copy()
         img_reconstruida[mascara == 1] = cor_fundo
-
         kernel_borda  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mascara_borda = (
-            cv2.dilate(mascara.astype(np.uint8), kernel_borda) - mascara.astype(np.uint8)
-        )
+        mascara_borda = cv2.dilate(mascara.astype(np.uint8), kernel_borda) - mascara.astype(np.uint8)
         if mascara_borda.sum() > 0:
             img_reconstruida = cv2.inpaint(img_reconstruida, mascara_borda, 3, flag)
-
     else:
-        print(f"  Modo colorido — correcao de cor (preserva texto), "
-              f"area da mancha: {area_mancha:,}px")
+        print(f"  Modo colorido — restauracao v2.17, area: {area_mancha:,}px")
         img_reconstruida = _corrigir_mancha_colorida(img, mascara)
 
     if ajuste_brilho != 1.0 or ajuste_contraste != 1.0:
@@ -412,7 +408,6 @@ def reconstruir_imagem(
 
     img_final = img.copy()
     img_final[mascara.astype(bool)] = img_reconstruida[mascara.astype(bool)]
-
     _salvar_imagem(img_final, caminho_saida)
 
     diff       = cv2.absdiff(img, img_final)
@@ -436,6 +431,8 @@ def reconstruir_imagem(
     }
 
 
+# ─── ETAPA 4: REMOÇÃO FINAL ──────────────────────────────────────────────────
+
 def remover_manchas(
     resultado_separacao: dict,
     resultado_reconstrucao: dict,
@@ -451,23 +448,23 @@ def remover_manchas(
     img_final = img_original.copy()
     img_final[mascara == 1] = img_reconstruida[mascara == 1]
 
-    diff          = cv2.absdiff(img_original, img_final).astype(np.float32)
-    diff_amp      = np.clip(diff * 10, 0, 255).astype(np.uint8)
-    diff_colorida = cv2.applyColorMap(diff_amp, cv2.COLORMAP_JET)
+    diff     = cv2.absdiff(img_original, img_final).astype(np.float32)
+    diff_amp = np.clip(diff * 10, 0, 255).astype(np.uint8)
+    diff_col = cv2.applyColorMap(diff_amp, cv2.COLORMAP_JET)
 
-    _salvar_imagem(img_final,     caminho_saida_final)
-    _salvar_imagem(diff_colorida, caminho_saida_diff)
+    _salvar_imagem(img_final, caminho_saida_final)
+    _salvar_imagem(diff_col,  caminho_saida_diff)
 
-    h, w         = img_original.shape[:2]
-    pixels_mod   = int(mascara.sum())
-    pct_mod      = round(pixels_mod / (h * w) * 100, 2)
-    diff_manchas = float(np.mean(cv2.absdiff(img_original, img_final)[mascara == 1]))
-    diff_fora    = float(np.mean(cv2.absdiff(img_original, img_final)[mascara == 0]))
+    h, w      = img_original.shape[:2]
+    px_mod    = int(mascara.sum())
+    pct_mod   = round(px_mod / (h * w) * 100, 2)
+    d_manchas = float(np.mean(cv2.absdiff(img_original, img_final)[mascara == 1]))
+    d_fora    = float(np.mean(cv2.absdiff(img_original, img_final)[mascara == 0]))
 
     relatorio = {
-        "Pixels modificados":         f"{pixels_mod:,} ({pct_mod}%)",
-        "Diferenca media (manchas)":  f"{diff_manchas:.2f}",
-        "Diferenca media (resto)":    f"{diff_fora:.4f}",
+        "Pixels modificados":         f"{px_mod:,} ({pct_mod}%)",
+        "Diferenca media (manchas)":  f"{d_manchas:.2f}",
+        "Diferenca media (resto)":    f"{d_fora:.4f}",
         "Imagem final salva em":      caminho_saida_final,
         "Mapa de diferenca salvo em": caminho_saida_diff,
         "Status":                     "Processamento concluido com sucesso",
@@ -476,30 +473,29 @@ def remover_manchas(
 
     return {
         "imagem_final":      img_final,
-        "diff_colorida":     diff_colorida,
+        "diff_colorida":     diff_col,
         "relatorio":         relatorio,
         "caminho_resultado": caminho_saida_final,
         "caminho_diff":      caminho_saida_diff,
     }
 
 
+# ─── COMPARAÇÃO ──────────────────────────────────────────────────────────────
+
 def criar_comparacao(
     img_original: np.ndarray,
     img_final: np.ndarray,
-    caminho_saida: str = "saida/05_antes_depois.png",
+    caminho_saida: str  = "saida/05_antes_depois.png",
     largura_maxima: int = 1600,
 ) -> str:
     h, w = img_original.shape[:2]
-
     escala = min(1.0, largura_maxima / (w * 2))
     if escala < 1.0:
-        nh = max(int(h * escala), 1)
-        nw = max(int(w * escala), 1)
-        img_a = cv2.resize(img_original, (nw, nh), interpolation=cv2.INTER_AREA)
-        img_d = cv2.resize(img_final,    (nw, nh), interpolation=cv2.INTER_AREA)
+        nh, nw = max(int(h*escala),1), max(int(w*escala),1)
+        img_a  = cv2.resize(img_original, (nw,nh), interpolation=cv2.INTER_AREA)
+        img_d  = cv2.resize(img_final,    (nw,nh), interpolation=cv2.INTER_AREA)
     else:
-        img_a = img_original.copy()
-        img_d = img_final.copy()
+        img_a, img_d = img_original.copy(), img_final.copy()
         nh, nw = h, w
 
     divisor    = np.full((nh, 4, 3), 255, dtype=np.uint8)
@@ -512,23 +508,19 @@ def criar_comparacao(
 
     for texto, x_base in [("ANTES", 0), ("DEPOIS", nw + 4)]:
         (tw, th), _ = cv2.getTextSize(texto, fonte, escala_txt, espessura)
-        x1 = x_base + padding
-        y1 = padding
-        x2 = x1 + tw + padding
-        y2 = y1 + th + padding
-
-        roi    = comparacao[y1:y2, x1:x2]
-        fundo  = np.zeros_like(roi)
-        comparacao[y1:y2, x1:x2] = cv2.addWeighted(roi, 0.4, fundo, 0.6, 0)
-
-        cv2.putText(comparacao, texto,
-                    (x1 + padding // 2, y2 - padding // 2),
-                    fonte, escala_txt, (255, 255, 255), espessura, cv2.LINE_AA)
+        x1, y1 = x_base + padding, padding
+        roi   = comparacao[y1:y1+th+padding, x1:x1+tw+padding]
+        fundo = np.zeros_like(roi)
+        comparacao[y1:y1+th+padding, x1:x1+tw+padding] = cv2.addWeighted(roi, 0.4, fundo, 0.6, 0)
+        cv2.putText(comparacao, texto, (x1+padding//2, y1+th+padding//2),
+                    fonte, escala_txt, (255,255,255), espessura, cv2.LINE_AA)
 
     _salvar_imagem(comparacao, caminho_saida)
-    print(f"  Comparacao antes/depois salva em: {caminho_saida}")
+    print(f"  Comparacao salva em: {caminho_saida}")
     return caminho_saida
 
+
+# ─── PIPELINE COMPLETO ───────────────────────────────────────────────────────
 
 def pipeline_removedor(
     caminho_imagem: str,
@@ -536,7 +528,7 @@ def pipeline_removedor(
     limiar_cor: float           = 35.0,
     limiar_relevo: float        = 15.0,
     limiar_textura: float       = 8.0,
-    tamanho_minimo: int         = 100,
+    tamanho_minimo: int         = 80,
     margem_separacao: int       = 4,
     metodo_inpainting: str      = "telea",
     raio_inpainting: int        = 5,
@@ -548,11 +540,12 @@ def pipeline_removedor(
 ) -> dict:
     os.makedirs(pasta_saida, exist_ok=True)
     print("\n" + "=" * 60)
-    print("   REMOVEDOR DE MANCHAS v2.4 - Pipeline Completo")
+    print("   REMOVEDOR DE MANCHAS Beta-v2.20 - Pipeline Completo")
+    print("   Deteccao: multi-escala v2.18 | Restauracao: v2.17")
     print("=" * 60)
-    print(f"   Imagem de entrada : {caminho_imagem}")
-    print(f"   Pasta de saida    : {pasta_saida}")
-    print(f"   Modo              : {tipo_imagem}  |  Sensibilidade: {sensibilidade}")
+    print(f"   Imagem    : {caminho_imagem}")
+    print(f"   Saida     : {pasta_saida}")
+    print(f"   Modo      : {tipo_imagem}  |  Sens: {sensibilidade}")
     print("=" * 60)
 
     r1 = detectar_manchas(
@@ -589,58 +582,57 @@ def pipeline_removedor(
     )
 
     print("\n[ETAPA 5] Gerando comparacao ANTES / DEPOIS...")
-    caminho_comp = criar_comparacao(
+    criar_comparacao(
         img_original  = r1["imagem_original"],
         img_final     = r4["imagem_final"],
         caminho_saida = f"{pasta_saida}/05_antes_depois.png",
     )
 
     print("\n" + "=" * 60)
-    print("   PIPELINE CONCLUIDO - Arquivos gerados:")
+    print("   PIPELINE CONCLUIDO:")
     print("=" * 60)
     for linha in [
-        f"  {pasta_saida}/01_deteccao.png      <- manchas destacadas",
-        f"  {pasta_saida}/02_frente.png         <- imagem sem manchas (alpha)",
+        f"  {pasta_saida}/01_deteccao.png      <- manchas detectadas",
+        f"  {pasta_saida}/02_frente.png         <- sem manchas (alpha)",
         f"  {pasta_saida}/02_fundo_manchas.png  <- manchas isoladas",
         f"  {pasta_saida}/03_reconstruida.png   <- imagem reparada",
-        f"  {pasta_saida}/04_imagem_final.png   <- resultado final limpo",
+        f"  {pasta_saida}/04_imagem_final.png   <- resultado final",
         f"  {pasta_saida}/04_diferenca.png      <- mapa de diferenca",
-        f"  {pasta_saida}/05_antes_depois.png   <- comparacao ANTES/DEPOIS  <--",
+        f"  {pasta_saida}/05_antes_depois.png   <- ANTES / DEPOIS  <--",
     ]:
         print(linha)
     print("=" * 60 + "\n")
 
     resultado = {
-        "etapa_1_deteccao":      r1["relatorio"],
-        "etapa_2_separacao":     r2["relatorio"],
-        "etapa_3_reconstrucao":  r3["relatorio"],
-        "etapa_4_remocao":       r4["relatorio"],
+        "etapa_1_deteccao":     r1["relatorio"],
+        "etapa_2_separacao":    r2["relatorio"],
+        "etapa_3_reconstrucao": r3["relatorio"],
+        "etapa_4_remocao":      r4["relatorio"],
     }
 
     if salvar_relatorio_json:
         caminho_json = f"{pasta_saida}/relatorio_completo.json"
-
         def serializar(obj):
             if isinstance(obj, np.integer):  return int(obj)
             if isinstance(obj, np.floating): return float(obj)
             return str(obj)
-
         with open(caminho_json, "w", encoding="utf-8") as f:
             json.dump(resultado, f, ensure_ascii=False, indent=2, default=serializar)
-        print(f"  Relatorio JSON salvo em: {caminho_json}\n")
+        print(f"  JSON salvo em: {caminho_json}\n")
 
     return resultado
 
+
+# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("\n  Uso: python removedor_manchas.py <imagem> [pasta_saida] [sensibilidade] [tipo]")
+        print("\n  Uso: python removedor_manchas.py <imagem> [pasta] [sens] [tipo]")
         print("  Exemplos:")
         print("    python removedor_manchas.py foto.jpg resultados")
-        print("    python removedor_manchas.py foto.jpg resultados 0.5 colorida")
-        print("    python removedor_manchas.py doc.png  resultados 1.0 branca\n")
+        print("    python removedor_manchas.py foto.jpg resultados 1.0 colorida\n")
         sys.exit(1)
 
     caminho = sys.argv[1]
@@ -651,15 +643,9 @@ if __name__ == "__main__":
     pipeline_removedor(
         caminho_imagem        = caminho,
         pasta_saida           = saida,
-        limiar_cor            = 35.0,
-        limiar_relevo         = 15.0,
-        limiar_textura        = 8.0,
-        tamanho_minimo        = 100,
+        tamanho_minimo        = 80,
         margem_separacao      = 4,
         metodo_inpainting     = "telea",
-        raio_inpainting       = 5,
-        ajuste_brilho         = 1.0,
-        ajuste_contraste      = 1.0,
         sensibilidade         = sensib,
         tipo_imagem           = tipo,
         salvar_relatorio_json = True,

@@ -1,0 +1,37 @@
+{
+  "etapa_1_deteccao": {
+    "Tipo de imagem": "branca",
+    "Total de manchas detectadas": 4,
+    "Pixels marcados": "43,079",
+    "Cobertura da imagem": "26.51%",
+    "Maior mancha (px)": 37875.0,
+    "Metodo Saturacao HSV": 31142,
+    "Metodo Relevo": 27732,
+    "Metodo Textura": 30297,
+    "Imagem salva em": "resultados/01_deteccao.png"
+  },
+  "etapa_2_separacao": {
+    "Manchas separadas": 4,
+    "Pixels no 2o plano": "51,336",
+    "Margem aplicada (px)": 4,
+    "Frente (PNG com alpha)": "resultados/02_frente.png",
+    "Fundo (manchas isoladas)": "resultados/02_fundo_manchas.png"
+  },
+  "etapa_3_reconstrucao": {
+    "Tipo de imagem": "branca",
+    "Metodo de inpainting": "TELEA",
+    "Raio de inpainting (px)": 5,
+    "Ajuste de brilho": "x1.0",
+    "Ajuste de contraste": "x1.0",
+    "Erro medio (fora manchas)": "0.0000",
+    "Resultado salvo em": "resultados/03_reconstruida.png"
+  },
+  "etapa_4_remocao": {
+    "Pixels modificados": "51,336 (31.59%)",
+    "Diferenca media (manchas)": "34.17",
+    "Diferenca media (resto)": "0.0000",
+    "Imagem final salva em": "resultados/04_imagem_final.png",
+    "Mapa de diferenca salvo em": "resultados/04_diferenca.png",
+    "Status": "Processamento concluido com sucesso"
+  }
+}
